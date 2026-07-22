@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Hệ thống quản lý nông nghiệp UET</title>
+  <link rel="icon" type="image/png" href="assets/logo-uet.png">
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      background: linear-gradient(135deg, #eef5ff 0%, #e6f7ea 100%);
+      min-height: 100vh;
+      color: #1a1a1a;
+      line-height: 1.5;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 48px 24px 32px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 56px;
+    }
+
+    .logo {
+      width: 110px;
+      height: auto;
+      margin-bottom: 20px;
+    }
+
+    h1 {
+      font-size: 2.2rem;
+      font-weight: 700;
+      color: #003d82;
+      margin-bottom: 12px;
+      letter-spacing: -0.5px;
+    }
+
+    .subtitle {
+      font-size: 1.05rem;
+      color: #555;
+      max-width: 640px;
+      margin: 0 auto;
+    }
+
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 24px;
+    }
+
+    .card {
+      background: #fff;
+      border-radius: 16px;
+      overflow: hidden;
+      box-shadow: 0 4px 20px rgba(0, 0, 0, 0.06);
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+      display: flex;
+      flex-direction: column;
+      border: 1px solid rgba(0, 0, 0, 0.04);
+    }
+
+    .card.active:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.12);
+    }
+
+    .card-banner {
+      height: 150px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 4rem;
+      color: #fff;
+      text-shadow: 0 2px 8px rgba(0, 0, 0, 0.2);
+    }
+
+    .banner-cassava { background: linear-gradient(135deg, #4caf50, #2e7d32); }
+    .banner-tomato  { background: linear-gradient(135deg, #ef5350, #c62828); }
+    .banner-rice    { background: linear-gradient(135deg, #ffb74d, #ef6c00); }
+    .banner-corn    { background: linear-gradient(135deg, #ffd54f, #f9a825); }
+
+    .card.disabled .card-banner { filter: grayscale(0.6) opacity(0.7); }
+
+    .card-body {
+      padding: 20px 22px 22px;
+      flex-grow: 1;
+      display: flex;
+      flex-direction: column;
+    }
+
+    .card h2 {
+      font-size: 1.2rem;
+      margin-bottom: 8px;
+      color: #1a1a1a;
+      font-weight: 600;
+    }
+
+    .card p {
+      font-size: 0.93rem;
+      color: #666;
+      margin-bottom: 18px;
+      flex-grow: 1;
+    }
+
+    .btn {
+      display: inline-block;
+      padding: 10px 20px;
+      background: #003d82;
+      color: #fff;
+      text-decoration: none;
+      border-radius: 8px;
+      font-weight: 500;
+      text-align: center;
+      transition: background 0.2s ease;
+      font-size: 0.95rem;
+    }
+
+    .btn:hover { background: #002a5c; }
+
+    .btn.disabled {
+      background: #e0e0e0;
+      color: #999;
+      cursor: not-allowed;
+      pointer-events: none;
+    }
+
+    .badge {
+      display: inline-block;
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border-radius: 12px;
+      font-weight: 500;
+      margin-left: 6px;
+      vertical-align: middle;
+    }
+
+    .badge-active { background: #e8f5e9; color: #2e7d32; }
+    .badge-soon   { background: #f5f5f5; color: #888; }
+
+    footer {
+      text-align: center;
+      margin-top: 64px;
+      padding-top: 24px;
+      border-top: 1px solid rgba(0, 0, 0, 0.08);
+      color: #888;
+      font-size: 0.85rem;
+    }
+
+    @media (max-width: 640px) {
+      .container { padding: 32px 16px 24px; }
+      h1 { font-size: 1.7rem; }
+      .subtitle { font-size: 0.98rem; }
+      .card-banner { height: 120px; font-size: 3rem; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <img src="assets/logo-uet.png" alt="Đại học Công nghệ UET" class="logo">
+      <h1>Trang quản lý hệ thống nông nghiệp UET</h1>
+      <p class="subtitle">Nền tảng IoT giám sát và điều khiển canh tác thông minh cho nhiều loại cây trồng</p>
+    </header>
+
+    <div class="cards">
+      <div class="card active">
+        <div class="card-banner banner-cassava">🌿</div>
+        <div class="card-body">
+          <h2>Ruộng sắn <span class="badge badge-active">Đang hoạt động</span></h2>
+          <p>Giám sát cảm biến đất, mô phỏng sản lượng, lịch sử tưới cho cây sắn.</p>
+          <a href="/cassava/" class="btn">Truy cập</a>
+        </div>
+      </div>
+
+      <div class="card disabled">
+        <div class="card-banner banner-tomato">🍅</div>
+        <div class="card-body">
+          <h2>Ruộng cà chua <span class="badge badge-soon">Sắp ra mắt</span></h2>
+          <p>Hệ thống giám sát và điều khiển canh tác cà chua.</p>
+          <a href="#" class="btn disabled">Chưa khả dụng</a>
+        </div>
+      </div>
+
+      <div class="card disabled">
+        <div class="card-banner banner-rice">🌾</div>
+        <div class="card-body">
+          <h2>Ruộng lúa <span class="badge badge-soon">Sắp ra mắt</span></h2>
+          <p>Hệ thống giám sát và điều khiển canh tác lúa.</p>
+          <a href="#" class="btn disabled">Chưa khả dụng</a>
+        </div>
+      </div>
+
+      <div class="card disabled">
+        <div class="card-banner banner-corn">🌽</div>
+        <div class="card-body">
+          <h2>Ruộng ngô <span class="badge badge-soon">Sắp ra mắt</span></h2>
+          <p>Hệ thống giám sát và điều khiển canh tác ngô.</p>
+          <a href="#" class="btn disabled">Chưa khả dụng</a>
+        </div>
+      </div>
+    </div>
+
+    <footer>
+      © 2026 Trường Đại học Công nghệ — Đại học Quốc gia Hà Nội
+    </footer>
+  </div>
+</body>
+</html>

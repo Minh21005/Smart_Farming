@@ -1,0 +1,21 @@
+# Virtual environment
+.venv/
+venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Environment file (use .env.example as template)
+.env
+
+# Model artifacts (regenerate via scripts/train.py)
+artifacts/
+
+# Runtime logs (training + eval + uvicorn smoke runs)
+*.log
+
+# IDE
+.vscode/
+.idea/

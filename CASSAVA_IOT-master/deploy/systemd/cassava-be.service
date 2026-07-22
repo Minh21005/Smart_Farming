@@ -1,0 +1,41 @@
+# systemd unit cho Cassava IoT Backend
+# Copy file này vào: /etc/systemd/system/cassava-be.service
+# Enable & start:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cassava-be
+# Xem log:
+#   sudo journalctl -u cassava-be -f
+
+[Unit]
+Description=Cassava IoT Backend (Spring Boot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=uet
+Group=uet
+WorkingDirectory=/opt/cassava
+
+# Kích hoạt profile production
+Environment=SPRING_PROFILES_ACTIVE=prod
+Environment=JAVA_OPTS=-Xms256m -Xmx768m
+
+# WAR của Spring Boot chạy được trực tiếp qua java -jar (embedded Tomcat)
+ExecStart=/usr/bin/java $JAVA_OPTS -jar /opt/cassava/cassava-be.war
+
+# Restart khi crash, chờ 10s giữa các lần thử
+Restart=on-failure
+RestartSec=10
+
+# Log đi systemd journal (xem qua journalctl), ngoài ra Spring tự ghi thêm vào file
+# theo logging.file.name trong application-prod.properties
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=cassava-be
+
+# Giới hạn tài nguyên
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

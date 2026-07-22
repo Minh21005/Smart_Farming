@@ -1,0 +1,28 @@
+# ML branch — full dep set: ARIMA/SARIMA + LSTM + NASA POWER fetch.
+
+# Mongo + data
+pymongo>=4.6
+pandas>=2.2
+numpy>=1.26
+
+# API
+fastapi>=0.110
+uvicorn[standard]>=0.27
+pydantic>=2.6
+
+# Config
+python-dotenv>=1.0
+
+# Statistical models
+statsmodels>=0.14         # ARIMA backend (used by ArimaDetector)
+pmdarima>=2.0             # auto_arima: stepwise AIC search for ARIMA orders
+statsforecast>=2.0        # SARIMA backend + AutoARIMA — memory-efficient on
+                          # multi-year hourly data (replaces statsmodels SARIMAX
+                          # which OOMs at ~52k rows × seasonal=24)
+
+# Deep learning (LSTM) — TF 2.18+ adds Python 3.13 support
+tensorflow>=2.18
+scikit-learn>=1.4
+
+# NASA POWER API client
+requests>=2.31

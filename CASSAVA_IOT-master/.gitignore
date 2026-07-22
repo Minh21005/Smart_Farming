@@ -1,0 +1,38 @@
+# Runtime / generated
+irrigation_data1.csv
+resultWeatherThaiLan.csv
+thEquiv_tracking.csv
+paho*/
+
+# Stray data/binaries in the Java source tree (experiment CSVs, zips — not source)
+cassavaBE/src/main/java/**/*.csv
+cassavaBE/src/main/java/**/*.zip
+
+# Build output
+CassavaFE/dist/
+CassavaFE/node_modules/
+cassavaBE/target/
+
+# ml-service (Python) — venv + cache + model artifacts
+ml-service/.venv/
+ml-service/artifacts/
+ml-service/.env
+**/__pycache__/
+*.pyc
+
+# Local env overrides (team-wide .env.development / .env.production ARE committed)
+.env.local
+.env.*.local
+
+# Edge runtime config (real Mongo URI + mosquitto credentials — must not be committed)
+edge/edge_config.json
+
+# IDE / editor
+.claude/
+.idea/
+.vscode/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
