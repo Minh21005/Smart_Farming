@@ -53,7 +53,6 @@ pthread_mutex_t db_mutex = PTHREAD_MUTEX_INITIALIZER;
 time_t last_sqlite_save_time = 0;
 
 int64_t now_ms(void);
-void getCurrentTime(char *dateStr, char *timeStr);
 void parseWeatherData(const char *payload, WeatherData *data);
 void weatherDataToJson(WeatherData *data, char *jsonOut, size_t maxLen);
 int setDataFirebase(const char *jsonData, const char *path);
@@ -63,12 +62,10 @@ int pushToMongo(WeatherData *data, int64_t t_ms);
 void initSQLite();
 int getDBRecordCount();
 int shouldSaveToSQLite();
-void saveToSQLite(const char *payload, const char *dateStr, const char *timeStr, int64_t t_ms);
+void saveToSQLite(const char *type, const char *payload, int64_t t_ms);
 void* senderWorkerThread(void *arg);
 
 int messageArrived(void *context, char *topicName, int topicLen, MQTTClient_message *message) {
-    char dateStr[16], timeStr[16];
-    getCurrentTime(dateStr, timeStr);
     int64_t t_ms = now_ms();
 
     char *payload = (char *)malloc(message->payloadlen + 1);
@@ -78,9 +75,14 @@ int messageArrived(void *context, char *topicName, int topicLen, MQTTClient_mess
 
     printf("\n[Luong 1] Nhan tu MQTT: %s\n", payload);
 
+    const char *type = NULL;
     if (strcmp(topicName, MQTT_TOPIC_WEATHER) == 0) {
+        type = "weather";
+    }
+
+    if (type) {
         if (shouldSaveToSQLite()) {
-            saveToSQLite(payload, dateStr, timeStr, t_ms);
+            saveToSQLite(type, payload, t_ms);
         } else {
             printf("[Luong 1] Dat nguong dung luong DB. Bo qua ban tin de tiet kiem bo nho.\n");
         }
@@ -100,14 +102,15 @@ void* senderWorkerThread(void *arg) {
         char payload[256] = {0};
         char dateStr[16] = {0};
         char timeStr[16] = {0};
-        int fb_flag = 0;
-        int mongo_flag = 0;
+        int firebase_stat = 0;
+        int mongo_stat = 0;
+        int pump_stat = 0;
         int attempts = 0;
         int64_t t_ms = 0;
         int row_found = 0;
 
-        const char *select_sql = "SELECT id, payload, date_str, time_str, fb_flag, mongo_flag, attempts, t_ms "
-                                 "FROM offline_weather ORDER BY id ASC LIMIT 1;";
+        const char *select_sql = "SELECT id, payload, date, time, firebase_stat, mongo_stat, pump_stat, attempts, t_ms "
+                                 "FROM offline_data WHERE type = 'weather' ORDER BY id ASC LIMIT 1;";
         sqlite3_stmt *stmt;
 
         pthread_mutex_lock(&db_mutex);
@@ -117,10 +120,11 @@ void* senderWorkerThread(void *arg) {
                 strcpy(payload, (const char *)sqlite3_column_text(stmt, 1));
                 strcpy(dateStr, (const char *)sqlite3_column_text(stmt, 2));
                 strcpy(timeStr, (const char *)sqlite3_column_text(stmt, 3));
-                fb_flag = sqlite3_column_int(stmt, 4);
-                mongo_flag = sqlite3_column_int(stmt, 5);
-                attempts = sqlite3_column_int(stmt, 6);
-                t_ms = sqlite3_column_int64(stmt, 7);
+                firebase_stat = sqlite3_column_int(stmt, 4);
+                mongo_stat = sqlite3_column_int(stmt, 5);
+                pump_stat = sqlite3_column_int(stmt, 6);
+                attempts = sqlite3_column_int(stmt, 7);
+                t_ms = sqlite3_column_int64(stmt, 8);
                 row_found = 1;
             }
             sqlite3_finalize(stmt);
@@ -134,7 +138,7 @@ void* senderWorkerThread(void *arg) {
 
             int network_error = 0;
 
-            if (fb_flag == 0) {
+            if (firebase_stat == 0) {
                 char jsonData[256];
                 weatherDataToJson(&wData, jsonData, sizeof(jsonData));
                 int fb_ok = 1;
@@ -148,36 +152,36 @@ void* senderWorkerThread(void *arg) {
                         break;
                     }
                 }
-                if (fb_ok) fb_flag = 1;
+                if (fb_ok) firebase_stat = 1;
                 else network_error = 1;
             }
 
-            if (mongo_flag == 0) {
-                if (pushToMongo(&wData, t_ms)) mongo_flag = 1;
+            if (mongo_stat == 0) {
+                if (pushToMongo(&wData, t_ms)) mongo_stat = 1;
                 else network_error = 1;
             }
 
             pthread_mutex_lock(&db_mutex);
-            if (fb_flag == 1 && mongo_flag == 1) {
+            if (firebase_stat == 1 && mongo_stat == 1) {
                 char del_sql[64];
-                snprintf(del_sql, sizeof(del_sql), "DELETE FROM offline_weather WHERE id = %d;", id);
+                snprintf(del_sql, sizeof(del_sql), "DELETE FROM offline_data WHERE id = %d;", id);
                 sqlite3_exec(db, del_sql, 0, 0, 0);
                 printf("[Luong 2] ID %d: Gui thanh cong ca Firebase & Mongo -> Da xoa khoi DB.\n", id);
             } else {
                 attempts++;
-                if (attempts >= 5) {
+                if (attempts >= 100) {
                     char del_sql[64];
-                    snprintf(del_sql, sizeof(del_sql), "DELETE FROM offline_weather WHERE id = %d;", id);
+                    snprintf(del_sql, sizeof(del_sql), "DELETE FROM offline_data WHERE id = %d;", id);
                     sqlite3_exec(db, del_sql, 0, 0, 0);
-                    printf("[Luong 2] ID %d: LOI QUA 5 LAN -> Buoc phai xoa khoi DB.\n", id);
+                    printf("[Luong 2] ID %d: LOI QUA 100 LAN -> Buoc phai xoa khoi DB.\n", id);
                 } else {
                     char up_sql[128];
                     snprintf(up_sql, sizeof(up_sql), 
-                             "UPDATE offline_weather SET fb_flag = %d, mongo_flag = %d, attempts = %d WHERE id = %d;", 
-                             fb_flag, mongo_flag, attempts, id);
+                             "UPDATE offline_data SET firebase_stat = %d, mongo_stat = %d, attempts = %d WHERE id = %d;", 
+                             firebase_stat, mongo_stat, attempts, id);
                     sqlite3_exec(db, up_sql, 0, 0, 0);
                     printf("[Luong 2] ID %d: Gui loi! Cap nhat co [FB:%d, Mongo:%d], So lan thu: %d\n", 
-                           id, fb_flag, mongo_flag, attempts);
+                           id, firebase_stat, mongo_stat, attempts);
                 }
             }
             pthread_mutex_unlock(&db_mutex);
@@ -194,17 +198,18 @@ void* senderWorkerThread(void *arg) {
 void initSQLite() {
     sqlite3_open(DB_FILE_PATH, &db);
     const char *sql_create = 
-        "CREATE TABLE IF NOT EXISTS offline_weather ("
+        "CREATE TABLE IF NOT EXISTS offline_data ("
         "id INTEGER PRIMARY KEY AUTOINCREMENT, "
-        "payload TEXT, date_str TEXT, time_str TEXT, "
-        "fb_flag INTEGER DEFAULT 0, mongo_flag INTEGER DEFAULT 0, "
-        "attempts INTEGER DEFAULT 0, t_ms INTEGER);";
+        "type TEXT NOT NULL, "
+        "payload TEXT, date TEXT, time TEXT, "
+        "firebase_stat INTEGER DEFAULT 0, mongo_stat INTEGER DEFAULT 0, "
+        "pump_stat INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, t_ms INTEGER);";
     sqlite3_exec(db, sql_create, 0, 0, 0);
 }
 
 int getDBRecordCount() {
     int count = 0;
-    const char *sql = "SELECT COUNT(*) FROM offline_weather;";
+    const char *sql = "SELECT COUNT(*) FROM offline_data;";
     sqlite3_stmt *stmt;
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
         if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
@@ -230,16 +235,15 @@ int shouldSaveToSQLite() {
     return 1;
 }
 
-void saveToSQLite(const char *payload, const char *dateStr, const char *timeStr, int64_t t_ms) {
-    const char *sql = "INSERT INTO offline_weather (payload, date_str, time_str, fb_flag, mongo_flag, attempts, t_ms) "
-                      "VALUES (?, ?, ?, 0, 0, 0, ?);";
+void saveToSQLite(const char *type, const char *payload, int64_t t_ms) {
+    const char *sql = "INSERT INTO offline_data (type, payload, date, time, firebase_stat, mongo_stat, pump_stat, attempts, t_ms) "
+                      "VALUES (?, ?, date('now'), time('now'), 0, 0, 0, 0, ?);";
     sqlite3_stmt *stmt;
     pthread_mutex_lock(&db_mutex);
     if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
-        sqlite3_bind_text(stmt, 1, payload, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 2, dateStr, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(stmt, 3, timeStr, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(stmt, 4, t_ms);
+        sqlite3_bind_text(stmt, 1, type, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, payload, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(stmt, 3, t_ms);
         if (sqlite3_step(stmt) == SQLITE_DONE) {
             printf("[Luong 1] Da chen vao SQLite thanh cong.\n");
             last_sqlite_save_time = time(NULL);
@@ -254,10 +258,6 @@ int64_t now_ms(void) {
     return (int64_t)tv.tv_sec * 1000LL + (int64_t)tv.tv_usec / 1000LL;
 }
 
-void getCurrentTime(char *dateStr, char *timeStr) {
-    time_t now = time(NULL); struct tm *tm_info = localtime(&now);
-    strftime(dateStr, 16, "%Y-%m-%d", tm_info); strftime(timeStr, 16, "%H:%M:%S", tm_info);
-}
 
 void parseWeatherData(const char *payload, WeatherData *data) {
     char buffer[256]; char *token, *saveptr1, *saveptr2;

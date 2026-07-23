@@ -24,9 +24,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <stdint.h>
 #include <unistd.h>
 #include <pthread.h>
 #include <sys/time.h>
+#include <sqlite3.h>
 
 /* ============================ CONFIG (edit here) ============================ */
 
@@ -36,6 +38,10 @@
 #define MQTT_CLIENT_ID   "cassava-edge-pump"
 
 #define CMD_TOPIC_FILTER "cassava/field/+/valve/+/cmd"
+#define DB_FILE_PATH    "offline_data.db"
+#define MAX_DB_RECORDS  100000
+#define LIMIT_50_PCT    (MAX_DB_RECORDS * 0.5)
+#define LIMIT_80_PCT    (MAX_DB_RECORDS * 0.8)
 
 /* Safety upper bound — refuse OPEN_TIMED requests exceeding this. */
 #define MAX_DURATION_SEC 3600
@@ -57,10 +63,14 @@ static const int RELAYS_LEN = sizeof(RELAYS) / sizeof(RELAYS[0]);
 #define MAX_VALVE_ID 16
 
 static MQTTClient            g_mqtt;
+static sqlite3              *db = NULL;
+static pthread_mutex_t       db_mutex = PTHREAD_MUTEX_INITIALIZER;
 static volatile sig_atomic_t g_run = 1;
 static pthread_mutex_t       g_pub_mutex = PTHREAD_MUTEX_INITIALIZER;
 /* Cờ abort theo valve_id: lệnh CLOSE bật cờ để worker đang tưới thoát sớm. */
 static volatile sig_atomic_t g_abort[MAX_VALVE_ID + 1];
+static volatile sig_atomic_t g_running[MAX_VALVE_ID + 1];
+static time_t                last_sqlite_save_time = 0;
 
 static void on_signal(int s) { (void)s; g_run = 0; }
 
@@ -89,6 +99,73 @@ static int publish_str(const char *topic, const char *payload) {
     return rc;
 }
 
+static int parse_field_id(const char *topic) {
+    const char *p = strstr(topic, "/field/");
+    if (!p) return -1;
+    p += 7;
+    char *end = NULL;
+    long v = strtol(p, &end, 10);
+    if (end == p || *end != '/') return -1;
+    return (int)v;
+}
+
+static int getDBRecordCount(void) {
+    int count = 0;
+    const char *sql = "SELECT COUNT(*) FROM offline_data;";
+    sqlite3_stmt *stmt;
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        if (sqlite3_step(stmt) == SQLITE_ROW) count = sqlite3_column_int(stmt, 0);
+        sqlite3_finalize(stmt);
+    }
+    return count;
+}
+
+static int shouldSaveToSQLite(void) {
+    pthread_mutex_lock(&db_mutex);
+    int count = getDBRecordCount();
+    pthread_mutex_unlock(&db_mutex);
+
+    time_t now = time(NULL);
+    if (count >= LIMIT_80_PCT) {
+        if (difftime(now, last_sqlite_save_time) >= 86400) return 1;
+        return 0;
+    } else if (count >= LIMIT_50_PCT) {
+        if (difftime(now, last_sqlite_save_time) >= 3600) return 1;
+        return 0;
+    }
+    return 1;
+}
+
+static void saveToSQLite(const char *type, const char *payload, int pump_stat, int64_t t_ms) {
+    const char *sql = "INSERT INTO offline_data (type, payload, date, time, firebase_stat, mongo_stat, pump_stat, attempts, t_ms) "
+                      "VALUES (?, ?, date('now','localtime'), time('now','localtime'), 0, 0, ?, 0, ?);";
+    sqlite3_stmt *stmt;
+    pthread_mutex_lock(&db_mutex);
+    if (sqlite3_prepare_v2(db, sql, -1, &stmt, NULL) == SQLITE_OK) {
+        sqlite3_bind_text(stmt, 1, type, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(stmt, 2, payload, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int(stmt, 3, pump_stat);
+        sqlite3_bind_int64(stmt, 4, t_ms);
+        if (sqlite3_step(stmt) == SQLITE_DONE) {
+            last_sqlite_save_time = time(NULL);
+        }
+        sqlite3_finalize(stmt);
+    }
+    pthread_mutex_unlock(&db_mutex);
+}
+
+static void initSQLite(void) {
+    sqlite3_open(DB_FILE_PATH, &db);
+    const char *sql_create = 
+        "CREATE TABLE IF NOT EXISTS offline_data ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT, "
+        "type TEXT NOT NULL, "
+        "payload TEXT, date TEXT, time TEXT, "
+        "firebase_stat INTEGER DEFAULT 0, mongo_stat INTEGER DEFAULT 0, "
+        "pump_stat INTEGER DEFAULT 0, attempts INTEGER DEFAULT 0, t_ms INTEGER);";
+    sqlite3_exec(db, sql_create, 0, 0, 0);
+}
+
 /* Replace trailing "/cmd" with "/ack". */
 static int build_ack_topic(const char *cmd_topic, char *out, size_t cap) {
     size_t n = strlen(cmd_topic);
@@ -112,14 +189,16 @@ static int parse_valve_id(const char *cmd_topic) {
     return (int)v;
 }
 
-static int build_ack_json(const char *schedule_id, int ok, const char *err,
+static int build_ack_json(const char *schedule_id, const char *ack,
+                          const char *err, const char *pump_state,
                           char *out, size_t cap) {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "scheduleId", schedule_id ? schedule_id : "");
-    cJSON_AddStringToObject(root, "ack",        ok ? "DONE" : "FAILED");
+    cJSON_AddStringToObject(root, "ack",        ack ? ack : "FAILED");
     cJSON_AddNumberToObject(root, "ackAt",      (double)now_ms());
-    if (ok || !err) cJSON_AddNullToObject(root, "errorMessage");
-    else            cJSON_AddStringToObject(root, "errorMessage", err);
+    if (pump_state) cJSON_AddStringToObject(root, "pumpState", pump_state);
+    if (err) cJSON_AddStringToObject(root, "errorMessage", err);
+    else           cJSON_AddNullToObject(root, "errorMessage");
 
     char *s = cJSON_PrintUnformatted(root);
     int rc = -1;
@@ -132,22 +211,25 @@ static int build_ack_json(const char *schedule_id, int ok, const char *err,
     return rc;
 }
 
-static void send_ack(const char *cmd_topic, const char *schedule_id, int ok, const char *err) {
+static void send_ack(const char *cmd_topic, const char *schedule_id,
+                     const char *ack, const char *err, const char *pump_state) {
     char ack_topic[256];
     char payload[256];
     if (build_ack_topic(cmd_topic, ack_topic, sizeof(ack_topic)) != 0) {
         fprintf(stderr, "[pump] cannot build ack topic from %s\n", cmd_topic);
         return;
     }
-    if (build_ack_json(schedule_id, ok, err, payload, sizeof(payload)) != 0) {
+    if (build_ack_json(schedule_id, ack, err, pump_state, payload, sizeof(payload)) != 0) {
         fprintf(stderr, "[pump] cannot build ack json (schedule=%s)\n",
                 schedule_id ? schedule_id : "?");
         return;
     }
     publish_str(ack_topic, payload);
-    fprintf(stdout, "[pump] %s schedule=%s -> %s\n",
-            ok ? "ACK_DONE" : "ACK_FAILED",
-            schedule_id ? schedule_id : "?", ack_topic);
+    fprintf(stdout, "[pump] %s schedule=%s pumpState=%s -> %s\n",
+            ack ? ack : "UNKNOWN",
+            schedule_id ? schedule_id : "?",
+            pump_state ? pump_state : "N/A",
+            ack_topic);
     fflush(stdout);
 }
 
@@ -160,21 +242,12 @@ static void send_running_ack(const char *cmd_topic, const char *schedule_id) {
         fprintf(stderr, "[pump] cannot build ack topic from %s\n", cmd_topic);
         return;
     }
-    cJSON *root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "scheduleId", schedule_id ? schedule_id : "");
-    cJSON_AddStringToObject(root, "ack",        "RUNNING");
-    cJSON_AddNumberToObject(root, "ackAt",      (double)now_ms());
-    cJSON_AddNullToObject(root, "errorMessage");
-    char *s = cJSON_PrintUnformatted(root);
-    if (s && strlen(s) + 1 <= sizeof(payload)) {
-        strcpy(payload, s);
+    if (build_ack_json(schedule_id, "RUNNING", NULL, "ON", payload, sizeof(payload)) == 0) {
         publish_str(ack_topic, payload);
-        fprintf(stdout, "[pump] ACK_RUNNING schedule=%s -> %s\n",
+        fprintf(stdout, "[pump] ACK_RUNNING schedule=%s pumpState=ON -> %s\n",
                 schedule_id ? schedule_id : "?", ack_topic);
         fflush(stdout);
     }
-    if (s) cJSON_free(s);
-    cJSON_Delete(root);
 }
 
 typedef struct {
@@ -192,7 +265,10 @@ static void *pump_worker(void *arg) {
             job->schedule_id, job->relay_topic, job->duration);
     fflush(stdout);
 
-    if (job->valve_id >= 0 && job->valve_id <= MAX_VALVE_ID) g_abort[job->valve_id] = 0;
+    if (job->valve_id >= 0 && job->valve_id <= MAX_VALVE_ID) {
+        g_abort[job->valve_id] = 0;
+        g_running[job->valve_id] = 1;
+    }
 
     publish_str(job->relay_topic, "1");
     send_running_ack(job->cmd_topic, job->schedule_id);  // báo BE: đang tưới (thoát NO_ACK)
@@ -208,13 +284,16 @@ static void *pump_worker(void *arg) {
     }
 
     publish_str(job->relay_topic, "0");
-    if (job->valve_id >= 0 && job->valve_id <= MAX_VALVE_ID) g_abort[job->valve_id] = 0;
+    if (job->valve_id >= 0 && job->valve_id <= MAX_VALVE_ID) {
+        g_abort[job->valve_id] = 0;
+        g_running[job->valve_id] = 0;
+    }
 
     fprintf(stdout, "[pump] %s schedule=%s relay=%s\n",
             stopped ? "STOPPED" : "DONE", job->schedule_id, job->relay_topic);
     fflush(stdout);
 
-    send_ack(job->cmd_topic, job->schedule_id, 1, NULL);
+    send_ack(job->cmd_topic, job->schedule_id, "DONE", NULL, "OFF");
 
     free(job);
     return NULL;
@@ -235,7 +314,7 @@ static int on_message(void *ctx, char *topic, int topic_len, MQTTClient_message 
 
     cJSON *root = cJSON_Parse(payload);
     if (!root) {
-        send_ack(topic, NULL, 0, "invalid json");
+        send_ack(topic, NULL, "FAILED", "invalid json", NULL);
         goto done;
     }
 
@@ -248,42 +327,57 @@ static int on_message(void *ctx, char *topic, int topic_len, MQTTClient_message 
     int duration      = cJSON_IsNumber(jDur) ? jDur->valueint : 0;
 
     if (!sched || !act) {
-        send_ack(topic, sched, 0, "missing scheduleId or action");
+        send_ack(topic, sched, "FAILED", "missing scheduleId or action", NULL);
         goto cleanup;
     }
 
     int valve_id = parse_valve_id(topic);
     const char *relay = (valve_id > 0) ? lookup_relay(valve_id) : NULL;
     if (!relay) {
-        send_ack(topic, sched, 0, "unknown valveId");
+        send_ack(topic, sched, "FAILED", "unknown valveId", NULL);
         goto cleanup;
     }
 
-    /* CLOSE: dừng tưới đang chạy — tắt relay ngay + bật cờ abort để worker (nếu còn
-     * đang đếm thời gian) thoát sớm. BE đã tính lượng nước một phần qua /stop nên ack
-     * này chỉ là xác nhận (idempotent ở BE). */
+    int pump_state = -1;
+    if (strcmp(act, "CLOSE") == 0) pump_state = 0;
+    else if (strcmp(act, "OPEN_TIMED") == 0) pump_state = 1;
+
+    /* CLOSE: dừng tưới đang chạy — nếu có phiên chạy hiện tại thì bật cờ abort để
+     * worker tự tắt relay và gửi ACK_DONE OFF. Nếu không có phiên chạy thì tắt relay
+     * ngay và gửi trạng thái OFF tức thì. */
     if (strcmp(act, "CLOSE") == 0) {
-        /* CHỈ set cờ abort — KHÔNG publish/ack trong callback. Publish ngay trong
-         * on_message sẽ kẹt thread nhận của Paho sync client (sau đó không nhận
-         * thêm cmd nào). Worker đang chạy sẽ phát hiện cờ và tự tắt relay + ack
-         * DONE trong ~1s. BE cũng đã ghi DONE khi bấm Dừng nên không cần ack ở đây. */
-        if (valve_id <= MAX_VALVE_ID) g_abort[valve_id] = 1;
-        fprintf(stdout, "[pump] CLOSE schedule=%s valve=%d (abort set)\n", sched, valve_id);
+        if (pump_state >= 0) {
+            saveToSQLite("pump", payload, pump_state, now_ms());
+        }
+        if (valve_id > 0 && valve_id <= MAX_VALVE_ID && g_running[valve_id]) {
+            g_abort[valve_id] = 1;
+            fprintf(stdout, "[pump] CLOSE schedule=%s valve=%d (abort set)\n", sched, valve_id);
+            fflush(stdout);
+            goto cleanup;
+        }
+
+        publish_str(relay, "0");
+        send_ack(topic, sched, "DONE", NULL, "OFF");
+        fprintf(stdout, "[pump] CLOSE schedule=%s valve=%d -> OFF\n", sched, valve_id);
         fflush(stdout);
         goto cleanup;
     }
 
     if (strcmp(act, "OPEN_TIMED") != 0) {
-        send_ack(topic, sched, 0, "unsupported action");
+        send_ack(topic, sched, "FAILED", "unsupported action", NULL);
         goto cleanup;
     }
     if (duration <= 0 || duration > MAX_DURATION_SEC) {
-        send_ack(topic, sched, 0, "invalid duration");
+        send_ack(topic, sched, "FAILED", "invalid duration", NULL);
         goto cleanup;
     }
 
+    if (pump_state >= 0) {
+        saveToSQLite("pump", payload, pump_state, now_ms());
+    }
+
     PumpJob *job = (PumpJob *)calloc(1, sizeof(*job));
-    if (!job) { send_ack(topic, sched, 0, "oom"); goto cleanup; }
+    if (!job) { send_ack(topic, sched, "FAILED", "oom", NULL); goto cleanup; }
 
     strncpy(job->cmd_topic,   topic, sizeof(job->cmd_topic) - 1);
     strncpy(job->schedule_id, sched, sizeof(job->schedule_id) - 1);
@@ -293,7 +387,7 @@ static int on_message(void *ctx, char *topic, int topic_len, MQTTClient_message 
 
     pthread_t tid;
     if (pthread_create(&tid, NULL, pump_worker, job) != 0) {
-        send_ack(topic, sched, 0, "thread create failed");
+        send_ack(topic, sched, "FAILED", "thread create failed", NULL);
         free(job);
         goto cleanup;
     }
@@ -315,6 +409,8 @@ static void on_disconnect(void *ctx, char *cause) {
 int main(void) {
     signal(SIGINT,  on_signal);
     signal(SIGTERM, on_signal);
+
+    initSQLite();
 
     if (MQTTClient_create(&g_mqtt, MQTT_BROKER_URL, MQTT_CLIENT_ID,
                           MQTTCLIENT_PERSISTENCE_NONE, NULL) != MQTTCLIENT_SUCCESS) {
@@ -361,5 +457,6 @@ int main(void) {
 
     MQTTClient_disconnect(g_mqtt, 1000);
     MQTTClient_destroy(&g_mqtt);
+    if (db) sqlite3_close(db);
     return EXIT_SUCCESS;
 }
